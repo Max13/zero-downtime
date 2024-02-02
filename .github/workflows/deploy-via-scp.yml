@@ -1,0 +1,167 @@
+name: Deploy via SCP
+
+on:
+  workflow_call:
+    inputs:
+      SCRIPT_AFTER_CHECKOUT:
+        description: Bash script executed after project checkout
+        default: ''
+        required: false
+        type: string
+      SCRIPT_AFTER_DST_SETUP:
+        description: Script executed on the destination server, after setup
+        default: ''
+        required: false
+        type: string
+      SCRIPT_BEFORE_UPLOAD:
+        description: Script executed before the project is transferred
+        default: ''
+        required: false
+        type: string
+      SCRIPT_ON_DST_BEFORE_DEPLOY:
+        description: Script executed on destination after the project was transferred, before deployment and final cleanup
+        default: ''
+        required: false
+        type: string
+      SCRIPT_ON_DST_AFTER_DEPLOY:
+        description: Script executed on destination after the project was transferred, after deployment and final cleanup
+        default: ''
+        required: false
+        type: string
+
+    secrets:
+      SSH_HOST:
+        description: Hostname or IP address
+        required: true
+      SSH_PORT:
+        required: false
+      SSH_USERNAME:
+        required: true
+      SSH_PASSWORD:
+        required: false
+      SSH_KEY:
+        description: SSH key in OpenSSH format to use
+        required: false
+      SSH_BASE_PATH:
+        description: Base path for the deployment
+        required: true
+      SSH_SYMLINK_PATH:
+        description: Final symlink path for the deployment (defaults to SSH_BASE_PATH/current)
+        required: false
+      SSH_CHOWN_USER:
+        description: If necessary, will chown the release and symlink paths to this user
+        required: false
+      SSH_CHOWN_GROUP:
+        description: If necessary, will chown the release and symlink paths to this user
+        required: false
+
+env:
+  SSH_HOST: "${{ secrets.SSH_HOST }}"
+  SSH_PORT: "${{ secrets.SSH_PORT || 22 }}"
+  SSH_USERNAME: "${{ secrets.SSH_USERNAME }}"
+  SSH_PASSWORD: "${{ secrets.SSH_PASSWORD }}"
+  SSH_KEY: "${{ secrets.SSH_KEY }}"
+  # SSH_KEYFILE <- Defined below
+
+  SSH_BASE_PATH: "${{ secrets.SSH_BASE_PATH }}"
+  # SSH_RELEASE_PATH <- Defined below
+  SSH_SYMLINK_PATH: "${{ secrets.SSH_SYMLINK_PATH || 'current' }}" # <- Redefined below
+  SSH_CHOWN_USER: "${{ secrets.SSH_CHOWN_USER }}"
+  SSH_CHOWN_GROUP: "${{ secrets.SSH_CHOWN_GROUP }}"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Check SSH Key or Password
+        if: env.SSH_KEY == null && env.SSH_PASSWORD == null
+        run: |
+          echo "Error: SSH_KEY or SSH_PASSWORD must be set"
+          exit 1
+
+      - name: Setup environment
+        run: |
+          echo "SSH_RELEASE_PATH=\"$SSH_BASE_PATH/$(date +%s)\"" >> $GITHUB_ENV
+          [ "${SSH_SYMLINK_PATH:0:1}" != '/' ] && echo "SSH_SYMLINK_PATH=\"$SSH_BASE_PATH/$SSH_SYMLINK_PATH\"" >> $GITHUB_ENV
+
+      - uses: actions/checkout@v4
+
+      - name: After checkout
+        run: |
+          ${{ inputs.SCRIPT_AFTER_CHECKOUT }}
+
+      - name: Create destination directories in server (using ssh key)
+        if: env.SSH_KEY != null
+        run: |
+          export SSH_KEYFILE="$(mktemp)" && echo "$SSH_KEY" > "$SSH_KEYFILE"
+          ssh -i "$SSH_KEYFILE" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT "$SSH_USERNAME"@"$SSH_HOST" "mkdir -p \"$SSH_RELEASE_PATH\""
+          rm "$SSH_KEYFILE"
+
+      - name: Create destination directories in server (using password)
+        if: env.SSH_KEY == null && env.SSH_PASSWORD != null
+        run: SSHPASS="$SSH_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT "$SSH_USERNAME"@"$SSH_HOST" "mkdir -p \"$SSH_RELEASE_PATH\""
+
+      - name: After destination setup
+        run: |
+          ${{ inputs.SCRIPT_AFTER_DST_SETUP }}
+
+      - name: Before upload
+        run: |
+          ${{ inputs.SCRIPT_BEFORE_UPLOAD }}
+
+      - name: Upload project to server (using ssh key)
+        if: env.SSH_KEY != null
+        run: |
+          export SSH_KEYFILE="$(mktemp)" && echo "$SSH_KEY" > "$SSH_KEYFILE"
+          scp -Cr -i "$SSH_KEYFILE" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P $SSH_PORT "$(pwd)"/* "$SSH_USERNAME"@"$SSH_HOST":"$SSH_RELEASE_PATH/"
+          rm "$SSH_KEYFILE"
+
+      - name: Upload project to server (using password)
+        if: env.SSH_KEY == null && env.SSH_PASSWORD != null
+        run: SSHPASS="$SSH_PASSWORD" sshpass -e scp -Cr -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P $SSH_PORT "$(pwd)"/* "$SSH_USERNAME"@"$SSH_HOST":"$SSH_RELEASE_PATH/"
+
+      - name: On destination before deployment
+        run: |
+          ${{ inputs.SCRIPT_ON_DST_BEFORE_DEPLOY }}
+
+      - name: Deploy (Symlink release to current, using ssh key)
+        if: env.SSH_KEY != null
+        run: |
+          export SSH_KEYFILE="$(mktemp)" && echo "$SSH_KEY" > "$SSH_KEYFILE"
+
+          echo "Linking release directory to current"
+          ssh -i "$SSH_KEYFILE" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT "$SSH_USERNAME"@"$SSH_HOST" "ln -sfnr \"$SSH_RELEASE_PATH\" \"$SSH_SYMLINK_PATH\""
+
+          echo "Cleaning up old releases"
+          ssh -i "$SSH_KEYFILE" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT "$SSH_USERNAME"@"$SSH_HOST" "find \"$SSH_BASE_PATH\" -maxdepth 1 -type d -regex "$SSH_BASE_PATH/[0-9]+" | sort -rg | tail -n +8 | xargs /bin/rm -rf --"
+          
+          rm "$SSH_KEYFILE"
+
+      - name: Deploy (Symlink release to current, using password)
+        if: env.SSH_KEY == null && env.SSH_PASSWORD != null
+        run: |
+          echo "Linking release directory to current"
+          SSHPASS="$SSH_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT "$SSH_USERNAME"@"$SSH_HOST" "ln -sfnr \"$SSH_RELEASE_PATH\" \"$SSH_SYMLINK_PATH\""
+
+          echo "Cleaning up old releases"
+          SSHPASS="$SSH_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT "$SSH_USERNAME"@"$SSH_HOST" "find \"$SSH_BASE_PATH\" -maxdepth 1 -type d -regex "$SSH_BASE_PATH/[0-9]+" | sort -rg | tail -n +8 | xargs /bin/rm -rf --"
+
+      - name: Chown (using ssh key)
+        if: (env.SSH_CHOWN_USER != null || env.SSH_CHOWN_GROUP != null) && env.SSH_KEY != null
+        run: |
+          export SSH_KEYFILE="$(mktemp)" && echo "$SSH_KEY" > "$SSH_KEYFILE"
+
+          echo "chown release and symlink paths"
+          ssh -i "$SSH_KEYFILE" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT "$SSH_USERNAME"@"$SSH_HOST" "chown -hR \"$SSH_CHOWN_USER\":\"$SSH_CHOWN_GROUP\" \"$SSH_RELEASE_PATH\" \"$SSH_SYMLINK_PATH\""
+          
+          rm "$SSH_KEYFILE"
+
+      - name: Chown (using password)
+        if: (env.SSH_CHOWN_USER != null || env.SSH_CHOWN_GROUP != null) && (env.SSH_KEY == null && env.SSH_PASSWORD != null)
+        run: |
+          echo "chown release and symlink paths"
+          SSHPASS="$SSH_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT "$SSH_USERNAME"@"$SSH_HOST" "chown -hR \"$SSH_CHOWN_USER\":\"$SSH_CHOWN_GROUP\" \"$SSH_RELEASE_PATH\" \"$SSH_SYMLINK_PATH\""
+
+      - name: On destination after deployment
+        run: |
+          ${{ inputs.SCRIPT_ON_DST_AFTER_DEPLOY }}
