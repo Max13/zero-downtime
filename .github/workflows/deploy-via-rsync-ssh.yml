@@ -113,12 +113,12 @@ jobs:
         if: env.SSH_KEY != null
         run: |
           export SSH_KEYFILE="$(mktemp)" && echo "$SSH_KEY" > "$SSH_KEYFILE"
-          rsync -e "ssh -i \"$SSH_KEYFILE\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT" -prz "$(pwd)/" "$SSH_USERNAME"@"$SSH_HOST":"$SSH_RELEASE_PATH"
+          rsync -e "ssh -i \"$SSH_KEYFILE\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT" -przl "$(pwd)/" "$SSH_USERNAME"@"$SSH_HOST":"$SSH_RELEASE_PATH"
           rm "$SSH_KEYFILE"
 
       - name: Upload project to server (using password)
         if: env.SSH_KEY == null && env.SSH_PASSWORD != null
-        run: SSHPASS="$SSH_PASSWORD" sshpass -e rsync -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT" -prz "$(pwd)/" "$SSH_USERNAME"@"$SSH_HOST":"$SSH_RELEASE_PATH"
+        run: SSHPASS="$SSH_PASSWORD" sshpass -e rsync -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT" -przl "$(pwd)/" "$SSH_USERNAME"@"$SSH_HOST":"$SSH_RELEASE_PATH"
 
       - name: On destination before deployment
         run: |
